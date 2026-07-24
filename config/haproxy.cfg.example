@@ -1,50 +1,65 @@
-# HAProxy Configuration Example for LiteLLM + Dashboard Service
-# Save to /etc/haproxy/haproxy.cfg and reload HAProxy: sudo systemctl reload haproxy
+# HAProxy Configuration Example for LiteLLM + Dashboard Service (Option 1: Path-based Routing)
+# Location: /etc/haproxy/haproxy.cfg
 
 global
-    log /dev/log local0
-    log /dev/log local1 notice
-    chroot /var/lib/haproxy
-    user haproxy
-    group haproxy
+    log         127.0.0.1 local2
+    chroot      /var/lib/haproxy
+    pidfile     /run/haproxy.pid
+    maxconn     4000
+    user        haproxy
+    group       haproxy
     daemon
+    stats socket /var/lib/haproxy/stats
+    ssl-default-bind-ciphers PROFILE=SYSTEM
+    ssl-default-server-ciphers PROFILE=SYSTEM
 
 defaults
-    log     global
-    mode    http
-    option  httplog
-    option  dontlognull
-    timeout connect 5000ms
-    timeout client  50000ms
-    timeout server  50000ms
+    mode                    http
+    log                     global
+    option                  httplog
+    option                  dontlognull
+    option http-server-close
+    option forwardfor       except 127.0.0.0/8
+    option                  redispatch
+    option                  tcp-smart-accept
+    retries                 3
+    timeout http-request    10s
+    timeout queue           1m
+    timeout connect         10s
+    timeout client          1m
+    timeout server          5m
+    timeout http-keep-alive 10s
+    timeout check           10s
+    maxconn                 3000
 
-# Public Gateway Frontend (Port 80 / 443)
-frontend http_in
+# Frontend HTTPS (Port 443 SSL)
+frontend https_inference
+    bind *:443 ssl crt /var/lib/haproxy/cert/inference.laplane.net.pem
+    acl is_inference hdr(host) -i inference.laplane.net
+
+    # Path-based ACL for LiteLLM Analytics Dashboard
+    acl is_dashboard_path path_beg /dashboard /login /static /api/auth /api/dashboard /logout
+
+    # Routing rules
+    use_backend litellm_dash_backend if is_inference is_dashboard_path
+    use_backend litellm_backend      if is_inference
+
+# Frontend HTTP (Port 80)
+frontend ai_frontend
     bind *:80
-    # For HTTPS: bind *:443 ssl crt /etc/ssl/certs/your-domain.pem alpn h2,http/1.1
-    # redirect scheme https if !{ ssl_fc }
+    acl is_inference hdr(host) -i inference.laplane.net
+    redirect scheme https code 301 if is_inference
 
-    # Forward proxy headers
-    option forwardfor
-    http-request set-header X-Forwarded-Proto http
-
-    # Define ACL rules for path routing
-    acl is_dashboard path_beg /dash /static /login /dashboard /api/auth /api/dashboard /logout
-    
-    # Alternatively for Subdomain Routing:
-    # acl is_dashboard_subdomain hdr(host) -i dash.yourdomain.com
-
-    use_backend dashboard_backend if is_dashboard
-    default_backend litellm_backend
-
-# Backend 1: LiteLLM Python Dashboard Service (Internal Port 8000)
-backend dashboard_backend
+# Backend 1: LiteLLM Python Analytics Dashboard Service (Internal Port 8000)
+backend litellm_dash_backend
     mode http
-    balance roundrobin
-    server dash_app1 127.0.0.1:8000 check
+    option httpchk GET /login
+    http-check expect status 200
+    server litellm_dash 127.0.0.1:8000 check inter 5s fall 3 rise 2
 
-# Backend 2: LiteLLM Proxy Instance (Internal Port 4000)
+# Backend 2: LiteLLM Proxy Instance (Internal Port 4001)
 backend litellm_backend
     mode http
-    balance roundrobin
-    server litellm_proxy1 127.0.0.1:4000 check
+    option httpchk GET /health/liveliness
+    http-check expect status 200
+    server litellm 127.0.0.1:4001 check inter 5s fall 3 rise 2
