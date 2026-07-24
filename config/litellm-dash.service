@@ -1,0 +1,22 @@
+[Unit]
+Description=LiteLLM Analytics Dashboard Web Service
+After=network.target litellm.service
+Wants=litellm.service
+
+[Service]
+Type=simple
+User=outscale
+Group=outscale
+WorkingDirectory=/home/outscale/litellm-dash
+EnvironmentFile=/home/outscale/litellm-dash/.env
+ExecStart=/home/outscale/litellm-dash/venv/bin/python run.py
+Restart=always
+RestartSec=5s
+
+# Security sandboxing
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

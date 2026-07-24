@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - LiteLLM Token & Model Analytics</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <!-- Chart.js CDN for visual analytics -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+    <div class="dash-shell">
+        <!-- Top Navigation Bar -->
+        <header class="top-navbar">
+            <div class="nav-brand">
+                <div class="nav-brand-icon">⚡</div>
+                <div class="nav-brand-title">LiteLLM Analytics</div>
+            </div>
+
+            <div class="user-profile-menu">
+                <div class="user-badge">
+                    <span class="user-status-dot"></span>
+                    <span>User: <strong>{{ user.user_id }}</strong></span>
+                    <span style="color: var(--text-dim);">({{ user.key_preview }})</span>
+                </div>
+                <button id="btn-logout" class="btn-secondary">Sign Out</button>
+            </div>
+        </header>
+
+        <!-- Main Dashboard Content -->
+        <main class="main-content">
+            <!-- Controls & Date Filter -->
+            <div class="controls-bar">
+                <h1 class="page-title">Token & Cost Consumption</h1>
+
+                <div class="date-filter-group">
+                    <label style="font-size: 0.85rem; color: var(--text-muted);">From:</label>
+                    <input type="date" id="start-date" class="date-input">
+                    <label style="font-size: 0.85rem; color: var(--text-muted);">To:</label>
+                    <input type="date" id="end-date" class="date-input">
+                    <button id="btn-apply-filter" class="btn-secondary" style="padding: 4px 12px; margin-left: 6px;">Apply Filter</button>
+                </div>
+            </div>
+
+            <!-- KPI Cards Summary -->
+            <section class="kpi-grid">
+                <div class="kpi-card" style="--card-accent: var(--accent-emerald);">
+                    <div class="kpi-label">Total Spend ($)</div>
+                    <div class="kpi-value" id="kpi-total-spend">$0.0000</div>
+                    <div class="kpi-subtext">Cumulative cost for selected range</div>
+                </div>
+
+                <div class="kpi-card" style="--card-accent: var(--accent-indigo);">
+                    <div class="kpi-label">Total Tokens</div>
+                    <div class="kpi-value" id="kpi-total-tokens">0</div>
+                    <div class="kpi-subtext">Prompt + Completion Tokens</div>
+                </div>
+
+                <div class="kpi-card" style="--card-accent: var(--accent-cyan);">
+                    <div class="kpi-label">Prompt / Completion</div>
+                    <div class="kpi-value" style="font-size: 1.35rem;">
+                        <span id="kpi-prompt-tokens" style="color: #6366f1;">0</span> / 
+                        <span id="kpi-completion-tokens" style="color: #06b6d4;">0</span>
+                    </div>
+                    <div class="kpi-subtext">Input vs. Output token breakdown</div>
+                </div>
+
+                <div class="kpi-card" style="--card-accent: var(--accent-purple);">
+                    <div class="kpi-label">Active Models</div>
+                    <div class="kpi-value" id="kpi-active-models">0</div>
+                    <div class="kpi-subtext">Models used in period</div>
+                </div>
+            </section>
+
+            <!-- Interactive Charts Grid -->
+            <section class="charts-grid">
+                <!-- Daily Trend Stacked Bar + Line Chart -->
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <h2 class="chart-title">Daily Token & Cost Consumption</h2>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="dailyChart"></canvas>
+                    </div>
+                </div>
+
+                <!-- Model Breakdown Doughnut Chart -->
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <h2 class="chart-title">Model Token Share</h2>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="modelChart"></canvas>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Detailed Log Table -->
+            <section class="table-card">
+                <div class="chart-header">
+                    <h2 class="chart-title">Daily Aggregated Consumption Records</h2>
+                </div>
+                <div class="table-wrapper">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Date</th>
+                                <th>Record Type</th>
+                                <th>Prompt Tokens</th>
+                                <th>Completion Tokens</th>
+                                <th>Total Tokens</th>
+                                <th>Spend ($)</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body-daily">
+                            <!-- Populated dynamically via JS -->
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

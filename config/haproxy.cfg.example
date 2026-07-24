@@ -1,0 +1,50 @@
+# HAProxy Configuration Example for LiteLLM + Dashboard Service
+# Save to /etc/haproxy/haproxy.cfg and reload HAProxy: sudo systemctl reload haproxy
+
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    chroot /var/lib/haproxy
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    http
+    option  httplog
+    option  dontlognull
+    timeout connect 5000ms
+    timeout client  50000ms
+    timeout server  50000ms
+
+# Public Gateway Frontend (Port 80 / 443)
+frontend http_in
+    bind *:80
+    # For HTTPS: bind *:443 ssl crt /etc/ssl/certs/your-domain.pem alpn h2,http/1.1
+    # redirect scheme https if !{ ssl_fc }
+
+    # Forward proxy headers
+    option forwardfor
+    http-request set-header X-Forwarded-Proto http
+
+    # Define ACL rules for path routing
+    acl is_dashboard path_beg /dash /static /login /dashboard /api/auth /api/dashboard /logout
+    
+    # Alternatively for Subdomain Routing:
+    # acl is_dashboard_subdomain hdr(host) -i dash.yourdomain.com
+
+    use_backend dashboard_backend if is_dashboard
+    default_backend litellm_backend
+
+# Backend 1: LiteLLM Python Dashboard Service (Internal Port 8000)
+backend dashboard_backend
+    mode http
+    balance roundrobin
+    server dash_app1 127.0.0.1:8000 check
+
+# Backend 2: LiteLLM Proxy Instance (Internal Port 4000)
+backend litellm_backend
+    mode http
+    balance roundrobin
+    server litellm_proxy1 127.0.0.1:4000 check
