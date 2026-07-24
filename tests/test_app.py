@@ -52,3 +52,9 @@ async def test_litellm_client_aggregation():
     assert "daily_trend" in metrics
     assert "model_breakdown" in metrics
     assert metrics["summary"]["total_tokens"] >= 0
+
+@pytest.mark.asyncio
+async def test_litellm_client_get_served_models():
+    client = LiteLLMClient()
+    models = await client.get_served_models()
+    assert isinstance(models, list)
