@@ -170,6 +170,48 @@ body {
   gap: 10px;
 }
 
+.error-banner {
+  background: rgba(244, 63, 94, 0.12);
+  border: 1px solid rgba(244, 63, 94, 0.4);
+  color: #fecdd3;
+  padding: 14px 20px;
+  border-radius: var(--radius-md);
+  font-size: 0.9rem;
+  margin-bottom: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  box-shadow: 0 4px 14px rgba(244, 63, 94, 0.15);
+  animation: fadeIn 0.3s ease-out;
+}
+
+.error-banner-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-weight: 500;
+}
+
+.error-banner-icon {
+  font-size: 1.2rem;
+}
+
+.btn-dismiss {
+  background: transparent;
+  border: none;
+  color: #fecdd3;
+  font-size: 1.25rem;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  opacity: 0.8;
+  transition: opacity 0.2s ease;
+}
+
+.btn-dismiss:hover {
+  opacity: 1;
+}
+
 /* ==========================================================================
    Dashboard Shell Layout
    ========================================================================== */

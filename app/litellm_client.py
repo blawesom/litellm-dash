@@ -7,9 +7,30 @@ from app.config import settings
 logger = logging.getLogger("litellm_dash.client")
 
 class LiteLLMClient:
-    def __init__(self, base_url: str = settings.LITELLM_BASE_URL, master_key: str = settings.LITELLM_MASTER_KEY):
+    def __init__(
+        self,
+        base_url: str = settings.LITELLM_BASE_URL,
+        master_key: str = settings.LITELLM_MASTER_KEY,
+        allow_mock: Optional[bool] = None
+    ):
         self.base_url = base_url.rstrip("/")
         self.master_key = master_key
+        self.allow_mock = settings.ALLOW_MOCK_FALLBACK if allow_mock is None else allow_mock
+        self._client: Optional[httpx.AsyncClient] = None
+        self._metrics_cache: Dict[str, Any] = {}
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(
+                timeout=httpx.Timeout(30.0, connect=10.0),
+                limits=httpx.Limits(max_keepalive_connections=20, max_connections=50)
+            )
+        return self._client
+
+    async def aclose(self):
+        if self._client and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -21,39 +42,39 @@ class LiteLLMClient:
         """
         Fetches the active list of models served by LiteLLM Proxy via /models or /v1/models endpoints.
         """
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            endpoints = ["/models", "/v1/models", "/model/info"]
-            for path in endpoints:
-                try:
-                    url = f"{self.base_url}{path}"
-                    headers = self._headers()
-                    if api_key and not self.master_key:
-                        headers = {"Authorization": f"Bearer {api_key}"}
+        client = self._get_client()
+        endpoints = ["/models", "/v1/models", "/model/info"]
+        for path in endpoints:
+            try:
+                url = f"{self.base_url}{path}"
+                headers = self._headers()
+                if api_key and not self.master_key:
+                    headers = {"Authorization": f"Bearer {api_key}"}
 
-                    resp = await client.get(url, headers=headers)
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        model_list = []
-                        if isinstance(data, list):
-                            raw_list = data
-                        elif isinstance(data, dict):
-                            raw_list = data.get("data", data.get("models", []))
-                        else:
-                            raw_list = []
+                resp = await client.get(url, headers=headers)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    model_list = []
+                    if isinstance(data, list):
+                        raw_list = data
+                    elif isinstance(data, dict):
+                        raw_list = data.get("data", data.get("models", []))
+                    else:
+                        raw_list = []
 
-                        for item in raw_list:
-                            if isinstance(item, dict):
-                                m_id = item.get("id") or item.get("model_name") or item.get("model")
-                                if m_id:
-                                    model_list.append(str(m_id))
-                            elif isinstance(item, str):
-                                model_list.append(item)
+                    for item in raw_list:
+                        if isinstance(item, dict):
+                            m_id = item.get("id") or item.get("model_name") or item.get("model")
+                            if m_id:
+                                model_list.append(str(m_id))
+                        elif isinstance(item, str):
+                            model_list.append(item)
 
-                        if model_list:
-                            logger.info(f"Retrieved {len(model_list)} served models from LiteLLM Proxy ({path})")
-                            return sorted(list(set(model_list)))
-                except Exception as e:
-                    logger.debug(f"Could not fetch served models from {path}: {e}")
+                    if model_list:
+                        logger.info(f"Retrieved {len(model_list)} served models from LiteLLM Proxy ({path})")
+                        return sorted(list(set(model_list)))
+            except Exception as e:
+                logger.debug(f"Could not fetch served models from {path}: {e}")
 
         return []
 
@@ -73,60 +94,66 @@ class LiteLLMClient:
 
         logger.info(f"Validating key for user '{clean_user}' against LiteLLM Proxy at {self.base_url}")
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                # 1. Query /key/info endpoint using Master Key
-                url = f"{self.base_url}/key/info?key={clean_key}"
-                response = await client.get(url, headers=self._headers())
+        client = self._get_client()
+        try:
+            # 1. Query /key/info endpoint using Master Key
+            from urllib.parse import quote
+            url = f"{self.base_url}/key/info?key={quote(clean_key)}"
+            response = await client.get(url, headers=self._headers())
 
-                if response.status_code == 200:
-                    data = response.json()
-                    key_info = data.get("info", data)
-                    assigned_user = key_info.get("user_id") or key_info.get("metadata", {}).get("user_id")
-                    key_alias = key_info.get("key_alias", "")
+            if response.status_code == 200:
+                data = response.json()
+                key_info = data.get("info", data)
+                assigned_user = key_info.get("user_id") or key_info.get("metadata", {}).get("user_id")
+                key_alias = key_info.get("key_alias", "")
 
-                    # Verify username match
-                    if assigned_user:
-                        if assigned_user.lower() != clean_user.lower():
-                            logger.warning(f"Key belongs to user '{assigned_user}', but username '{clean_user}' was provided")
-                            return {
-                                "valid": False,
-                                "error": f"API Key belongs to user '{assigned_user}', not '{clean_user}'."
-                            }
-                    else:
-                        logger.info(f"Key has no explicit assigned user_id. Assigning/binding session to '{clean_user}'.")
-
-                    return {
-                        "valid": True,
-                        "user_id": clean_user,
-                        "key_alias": key_alias,
-                        "models": key_info.get("models", []),
-                        "max_budget": key_info.get("max_budget"),
-                        "spend": key_info.get("spend", 0.0)
-                    }
-
-                elif response.status_code in (401, 403, 404):
-                    logger.warning(f"Key validation failed with HTTP status {response.status_code}")
-                    return {"valid": False, "error": "Invalid LiteLLM API Key or Key not found."}
-
+                # Verify username match
+                if assigned_user:
+                    if assigned_user.lower() != clean_user.lower():
+                        logger.warning(f"Key belongs to user '{assigned_user}', but username '{clean_user}' was provided")
+                        return {
+                            "valid": False,
+                            "error": f"API Key belongs to user '{assigned_user}', not '{clean_user}'."
+                        }
                 else:
-                    logger.error(f"LiteLLM key/info error status {response.status_code}: {response.text}")
-                    return await self._validate_fallback_user_info(client, clean_user, clean_key)
+                    logger.info(f"Key has no explicit assigned user_id. Assigning/binding session to '{clean_user}'.")
 
-            except httpx.ConnectError:
-                logger.error(f"Could not connect to LiteLLM Proxy at {self.base_url}")
+                return {
+                    "valid": True,
+                    "user_id": clean_user,
+                    "key_alias": key_alias,
+                    "models": key_info.get("models", []),
+                    "max_budget": key_info.get("max_budget"),
+                    "spend": key_info.get("spend", 0.0)
+                }
+
+            elif response.status_code in (401, 403, 404):
+                logger.warning(f"Key validation failed with HTTP status {response.status_code}")
+                return {"valid": False, "error": "Invalid LiteLLM API Key or Key not found."}
+
+            else:
+                logger.error(f"LiteLLM key/info error status {response.status_code}: {response.text}")
+                return await self._validate_fallback_user_info(client, clean_user, clean_key)
+
+        except httpx.ConnectError:
+            logger.error(f"Could not connect to LiteLLM Proxy at {self.base_url}")
+            if self.allow_mock:
                 return self._dev_mock_validation(clean_user, clean_key)
+            return {"valid": False, "error": f"Could not connect to LiteLLM Proxy at {self.base_url}. Please verify LiteLLM Proxy is running."}
 
-            except Exception as e:
-                logger.error(f"Exception during key validation: {e}")
-                return {"valid": False, "error": f"Error connecting to LiteLLM: {str(e)}"}
+        except Exception as e:
+            logger.error(f"Exception during key validation: {e}")
+            if self.allow_mock:
+                return self._dev_mock_validation(clean_user, clean_key)
+            return {"valid": False, "error": f"Error connecting to LiteLLM Proxy: {str(e)}"}
 
     async def _validate_fallback_user_info(self, client: httpx.AsyncClient, username: str, api_key: str) -> Dict[str, Any]:
         """
         Secondary validation fallback via /user/info endpoint.
         """
         try:
-            url = f"{self.base_url}/user/info?user_id={username}"
+            from urllib.parse import quote
+            url = f"{self.base_url}/user/info?user_id={quote(username)}"
             resp = await client.get(url, headers=self._headers())
             if resp.status_code == 200:
                 data = resp.json()
@@ -158,11 +185,13 @@ class LiteLLMClient:
         user_id: str,
         api_key: str,
         start_date: Optional[str] = None,
-        end_date: Optional[str] = None
+        end_date: Optional[str] = None,
+        user_models: Optional[List[str]] = None,
+        ttl_seconds: int = 15
     ) -> Dict[str, Any]:
         """
         Queries LiteLLM spend logs for the user and aggregates metrics into daily trends and model breakdown,
-        cross-referenced with LiteLLM's served model list.
+        utilizing a TTL cache to minimize database hits.
         """
         today = datetime.now().date()
         if not end_date:
@@ -170,14 +199,22 @@ class LiteLLMClient:
         if not start_date:
             start_date = (today - timedelta(days=6)).strftime("%Y-%m-%d")
 
-        # 1. Retrieve LiteLLM's official served model list from /models
-        served_models = await self.get_served_models(api_key=api_key)
+        # Check TTL Cache
+        cache_key = f"{user_id}:{start_date}:{end_date}"
+        now = datetime.now()
+        if cache_key in self._metrics_cache:
+            cached_res, cached_time = self._metrics_cache[cache_key]
+            if (now - cached_time).total_seconds() < ttl_seconds:
+                logger.debug(f"Returning cached dashboard metrics for '{cache_key}'")
+                return cached_res
 
-        # 2. Fetch transaction logs from LiteLLM spend logs
-        raw_logs = await self._fetch_spend_logs(user_id, api_key, start_date, end_date, served_models=served_models)
+        # 1. Fetch transaction logs directly from LiteLLM spend logs
+        raw_logs = await self._fetch_spend_logs(user_id, api_key, start_date, end_date, user_models=user_models)
 
-        # 3. Aggregate metrics incorporating served model definitions
-        return self._aggregate_metrics(raw_logs, start_date, end_date, served_models=served_models)
+        # 2. Aggregate metrics incorporating models extracted from transaction logs
+        result = self._aggregate_metrics(raw_logs, start_date, end_date, user_models=user_models)
+        self._metrics_cache[cache_key] = (result, now)
+        return result
 
     async def _fetch_spend_logs(
         self,
@@ -185,49 +222,96 @@ class LiteLLMClient:
         api_key: str,
         start_date: str,
         end_date: str,
-        served_models: List[str]
+        user_models: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Fetches spend logs from LiteLLM Proxy /spend/logs endpoint.
+        Fetches spend and token logs from LiteLLM Proxy using optimized /user/daily/activity endpoint with fallback to /spend/logs.
         """
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            try:
-                url = f"{self.base_url}/spend/logs?user_id={user_id}&start_date={start_date}&end_date={end_date}&summarize=false"
-                resp = await client.get(url, headers=self._headers())
+        from urllib.parse import quote
+        client = self._get_client()
+        safe_user = quote(user_id)
+        safe_start = quote(start_date)
+        safe_end = quote(end_date)
 
-                if resp.status_code == 200:
-                    data = resp.json()
-                    if isinstance(data, list):
-                        return data
-                    elif isinstance(data, dict):
-                        return data.get("logs", data.get("data", []))
-                else:
-                    logger.warning(f"Spend logs returned status {resp.status_code}. Trying key spend fallback.")
-                    url_key = f"{self.base_url}/key/info?key={api_key}"
-                    resp_key = await client.get(url_key, headers=self._headers())
-                    if resp_key.status_code == 200:
-                        key_data = resp_key.json()
-                        logs = key_data.get("info", {}).get("spend_logs", [])
-                        if logs:
-                            return logs
+        try:
+            # 1. Primary optimized query: /user/daily/activity (queries LiteLLM_DailyUserSpend table for tokens + spend)
+            url_activity = f"{self.base_url}/user/daily/activity?user_id={safe_user}&start_date={safe_start}&end_date={safe_end}&page_size=1000"
+            resp_activity = await client.get(url_activity, headers=self._headers())
 
-            except httpx.ConnectError:
-                logger.warning("LiteLLM Proxy offline. Generating sample metrics from served models.")
-                return self._generate_mock_logs(user_id, start_date, end_date, served_models=served_models)
-            except Exception as e:
-                logger.error(f"Error fetching spend logs: {e}")
+            if resp_activity.status_code == 200:
+                data = resp_activity.json()
+                results = data.get("results")
+                if isinstance(results, list) and len(results) > 0:
+                    return results
 
-        return self._generate_mock_logs(user_id, start_date, end_date, served_models=served_models)
+            # 2. Secondary fallback: /spend/logs?summarize=true
+            url_spend = f"{self.base_url}/spend/logs?user_id={safe_user}&start_date={safe_start}&end_date={safe_end}&summarize=true"
+            resp = await client.get(url_spend, headers=self._headers())
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list):
+                    return data
+                elif isinstance(data, dict):
+                    return data.get("logs", data.get("data", []))
+            else:
+                logger.warning(f"Spend logs returned status {resp.status_code}. Trying key spend fallback.")
+                url_key = f"{self.base_url}/key/info?key={quote(api_key)}"
+                resp_key = await client.get(url_key, headers=self._headers())
+                if resp_key.status_code == 200:
+                    key_data = resp_key.json()
+                    logs = key_data.get("info", {}).get("spend_logs", [])
+                    if logs:
+                        return logs
+
+                err_msg = f"LiteLLM Proxy spend logs endpoint returned HTTP status {resp.status_code}"
+                try:
+                    err_json = resp.json()
+                    detail = err_json.get("detail") or err_json.get("message")
+                    if detail:
+                        err_msg += f": {detail}"
+                except Exception:
+                    pass
+
+                if self.allow_mock:
+                    logger.warning(f"{err_msg}. Generating sample metrics (mock allowed).")
+                    return self._generate_mock_logs(user_id, start_date, end_date, user_models=user_models)
+
+                raise RuntimeError(err_msg)
+
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout fetching spend logs for user '{user_id}' ({start_date} to {end_date}): {e}")
+            if self.allow_mock:
+                return self._generate_mock_logs(user_id, start_date, end_date, user_models=user_models)
+            raise RuntimeError("Request to LiteLLM Proxy timed out while querying spend logs. Please select a smaller date range or contact administrator.")
+        except httpx.ConnectError as e:
+            logger.error(f"Could not connect to LiteLLM Proxy at {self.base_url}: {e}")
+            if self.allow_mock:
+                logger.warning("LiteLLM Proxy offline. Generating sample metrics (mock allowed).")
+                return self._generate_mock_logs(user_id, start_date, end_date, user_models=user_models)
+            raise RuntimeError(f"Could not connect to LiteLLM Proxy at {self.base_url}. Please ensure LiteLLM Proxy is running.")
+        except RuntimeError:
+            raise
+        except Exception as e:
+            logger.error(f"Error fetching spend logs: {e}")
+            if self.allow_mock:
+                return self._generate_mock_logs(user_id, start_date, end_date, user_models=user_models)
+            err_str = str(e).strip() or type(e).__name__
+            raise RuntimeError(f"Error fetching spend logs from LiteLLM Proxy: {err_str}")
+
+        if self.allow_mock:
+            return self._generate_mock_logs(user_id, start_date, end_date, user_models=user_models)
+        raise RuntimeError(f"Failed to retrieve spend logs from LiteLLM Proxy at {self.base_url}")
 
     def _generate_mock_logs(
         self,
         user_id: str,
         start_date: str,
         end_date: str,
-        served_models: Optional[List[str]] = None
+        user_models: Optional[List[str]] = None
     ) -> List[Dict[str, Any]]:
         """
-        Generates sample spend log entries based on LiteLLM's served model list when offline or testing.
+        Generates sample spend log entries based on LiteLLM model names when testing.
         """
         try:
             s_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
@@ -236,7 +320,7 @@ class LiteLLMClient:
             s_dt = datetime.now().date() - timedelta(days=6)
             e_dt = datetime.now().date()
 
-        model_names = served_models if served_models else ["gpt-4o", "claude-3-5-sonnet", "llama-3.1-70b"]
+        model_names = user_models if user_models else ["gpt-4o", "claude-3-5-sonnet", "llama-3.1-70b"]
 
         logs = []
         curr = s_dt
@@ -268,11 +352,10 @@ class LiteLLMClient:
         raw_logs: List[Dict[str, Any]],
         start_date: str,
         end_date: str,
-        served_models: Optional[List[str]] = None
+        user_models: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
-        Aggregates raw log items into daily trend time series and model breakdown stats.
-        Ensures all LiteLLM served models are represented in the model breakdown.
+        Aggregates raw log items or daily activity items into daily trend time series and model breakdown stats.
         """
         total_spend = 0.0
         total_prompt_tokens = 0
@@ -282,19 +365,7 @@ class LiteLLMClient:
         daily_map: Dict[str, Dict[str, Any]] = {}
         model_map: Dict[str, Dict[str, Any]] = {}
 
-        # 1. Initialize served models in model_map so LiteLLM served models are tracked
-        if served_models:
-            for m_name in served_models:
-                model_map[m_name] = {
-                    "model": m_name,
-                    "tokens": 0,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "spend": 0.0,
-                    "requests": 0
-                }
-
-        # 2. Build daily map for date range
+        # 1. Build daily map for date range
         try:
             s_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
             e_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -313,13 +384,107 @@ class LiteLLMClient:
         except Exception:
             pass
 
-        # 3. Process logs
+        # 2. Process logs
         for entry in raw_logs:
+            # Format 1: /user/daily/activity structure (contains "date" and "metrics")
+            if "date" in entry and "metrics" in entry:
+                date_str = str(entry.get("date") or "")[:10]
+                metrics = entry.get("metrics") or {}
+                p_tok = int(metrics.get("prompt_tokens") or 0)
+                c_tok = int(metrics.get("completion_tokens") or 0)
+                tot_tok = int(metrics.get("total_tokens") or (p_tok + c_tok))
+                cost = float(metrics.get("spend") or 0.0)
+                reqs = int(metrics.get("api_requests") or 1)
+
+                total_spend += cost
+                total_prompt_tokens += p_tok
+                total_completion_tokens += c_tok
+
+                if date_str not in daily_map:
+                    daily_map[date_str] = {
+                        "date": date_str,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "spend": 0.0,
+                        "requests": 0
+                    }
+                daily_map[date_str]["prompt_tokens"] += p_tok
+                daily_map[date_str]["completion_tokens"] += c_tok
+                daily_map[date_str]["total_tokens"] += tot_tok
+                daily_map[date_str]["spend"] += cost
+                daily_map[date_str]["requests"] += reqs
+
+                breakdown = entry.get("breakdown") or {}
+                models_dict = breakdown.get("models") or breakdown.get("model_groups") or entry.get("models") or {}
+                for raw_m, m_val in models_dict.items():
+                    m_metrics = m_val.get("metrics") if isinstance(m_val, dict) else {}
+                    m_p_tok = int(m_metrics.get("prompt_tokens") or 0)
+                    m_c_tok = int(m_metrics.get("completion_tokens") or 0)
+                    m_tot_tok = int(m_metrics.get("total_tokens") or (m_p_tok + m_c_tok))
+                    m_cost = float(m_metrics.get("spend") or (m_val if isinstance(m_val, (int, float)) else 0.0))
+                    m_reqs = int(m_metrics.get("api_requests") or 1)
+
+                    clean_m = raw_m.split("/")[-1].strip() if "/" in raw_m else raw_m.strip()
+                    if clean_m not in model_map:
+                        model_map[clean_m] = {
+                            "model": clean_m,
+                            "tokens": 0,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "spend": 0.0,
+                            "requests": 0
+                        }
+                    model_map[clean_m]["tokens"] += m_tot_tok
+                    model_map[clean_m]["prompt_tokens"] += m_p_tok
+                    model_map[clean_m]["completion_tokens"] += m_c_tok
+                    model_map[clean_m]["spend"] += m_cost
+                    model_map[clean_m]["requests"] += m_reqs
+                continue
+
+            # Format 2: /spend/logs?summarize=true structure (contains "models" dict and "spend")
+            models_dict = entry.get("models")
+            if isinstance(models_dict, dict) and models_dict:
+                ts = entry.get("startTime") or entry.get("timestamp") or ""
+                date_str = str(ts)[:10] if len(ts) >= 10 else datetime.now().strftime("%Y-%m-%d")
+                cost = float(entry.get("spend") or 0.0)
+                total_spend += cost
+
+                if date_str not in daily_map:
+                    daily_map[date_str] = {
+                        "date": date_str,
+                        "prompt_tokens": 0,
+                        "completion_tokens": 0,
+                        "total_tokens": 0,
+                        "spend": 0.0,
+                        "requests": 0
+                    }
+                daily_map[date_str]["spend"] += cost
+                daily_map[date_str]["requests"] += 1
+
+                for raw_m, m_spend in models_dict.items():
+                    m_cost = float(m_spend or 0.0)
+                    model = raw_m.split("/")[-1].strip() if "/" in raw_m else raw_m.strip()
+                    if model not in model_map:
+                        model_map[model] = {
+                            "model": model,
+                            "tokens": 0,
+                            "prompt_tokens": 0,
+                            "completion_tokens": 0,
+                            "spend": 0.0,
+                            "requests": 0
+                        }
+                    model_map[model]["spend"] += m_cost
+                    model_map[model]["requests"] += 1
+                continue
+
+            # Standard raw log item structure
             p_tok = int(entry.get("prompt_tokens") or entry.get("prompt_tok") or 0)
             c_tok = int(entry.get("completion_tokens") or entry.get("completion_tok") or 0)
             tot_tok = int(entry.get("total_tokens") or (p_tok + c_tok))
             cost = float(entry.get("spend") or entry.get("cost") or 0.0)
-            model = str(entry.get("model") or entry.get("model_name") or "unknown-model")
+            raw_model = str(entry.get("model") or entry.get("model_name") or "unknown-model")
+            model = raw_model.split("/")[-1].strip() if "/" in raw_model else raw_model.strip()
 
             ts = entry.get("startTime") or entry.get("timestamp") or entry.get("created_at") or ""
             date_str = ts[:10] if len(ts) >= 10 else datetime.now().strftime("%Y-%m-%d")
@@ -365,28 +530,29 @@ class LiteLLMClient:
         tot_tokens = total_prompt_tokens + total_completion_tokens
         model_breakdown = []
         for m_name, m_data in model_map.items():
-            pct = round((m_data["tokens"] / tot_tokens * 100), 2) if tot_tokens > 0 else 0.0
-            model_breakdown.append({
-                "model": m_name,
-                "tokens": m_data["tokens"],
-                "prompt_tokens": m_data["prompt_tokens"],
-                "completion_tokens": m_data["completion_tokens"],
-                "spend": round(m_data["spend"], 6),
-                "requests": m_data["requests"],
-                "percentage": pct
-            })
+            if m_data["tokens"] > 0 or m_data["spend"] > 0:
+                pct = round((m_data["tokens"] / tot_tokens * 100), 2) if tot_tokens > 0 else 0.0
+                model_breakdown.append({
+                    "model": m_name,
+                    "tokens": m_data["tokens"],
+                    "prompt_tokens": m_data["prompt_tokens"],
+                    "completion_tokens": m_data["completion_tokens"],
+                    "spend": round(m_data["spend"], 6),
+                    "requests": m_data["requests"],
+                    "percentage": pct
+                })
 
-        # Sort: active models with tokens first, then zero-usage served models alphabetically
-        model_breakdown.sort(key=lambda x: (x["tokens"] > 0, x["tokens"], x["model"]), reverse=True)
+        # Sort active models by token volume descending
+        model_breakdown.sort(key=lambda x: (x["tokens"], x["requests"], x["model"]), reverse=True)
 
         return {
             "summary": {
-                "total_spend": round(total_spend, 4),
+                "total_spend": round(total_spend, 2),
                 "total_tokens": tot_tokens,
                 "prompt_tokens": total_prompt_tokens,
                 "completion_tokens": total_completion_tokens,
                 "total_requests": total_requests,
-                "active_models_count": len([m for m in model_breakdown if m["tokens"] > 0]),
+                "active_models_count": len(model_breakdown),
                 "total_served_models_count": len(model_breakdown),
                 "date_range": {"start": start_date, "end": end_date}
             },

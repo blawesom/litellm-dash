@@ -10,6 +10,10 @@ document.addEventListener("DOMContentLoaded", () => {
         fetchDashboardMetrics();
     });
 
+    document.getElementById("btn-dismiss-error")?.addEventListener("click", () => {
+        hideErrorBanner();
+    });
+
     document.getElementById("btn-logout")?.addEventListener("click", async () => {
         try {
             await fetch("/api/auth/logout", { method: "POST" });
@@ -19,6 +23,22 @@ document.addEventListener("DOMContentLoaded", () => {
         }
     });
 });
+
+function showErrorBanner(message) {
+    const banner = document.getElementById("dashboard-error-banner");
+    const textEl = document.getElementById("dashboard-error-text");
+    if (banner && textEl) {
+        textEl.innerText = message;
+        banner.style.display = "flex";
+    }
+}
+
+function hideErrorBanner() {
+    const banner = document.getElementById("dashboard-error-banner");
+    if (banner) {
+        banner.style.display = "none";
+    }
+}
 
 function initDateInputs() {
     const endDateInput = document.getElementById("end-date");
@@ -56,29 +76,59 @@ async function fetchDashboardMetrics() {
             return;
         }
 
-        if (!response.ok) {
-            throw new Error(`Server returned status ${response.status}`);
+        const data = await response.json();
+        if (!response.ok || data.error) {
+            const errorMsg = data.detail || (typeof data.error === 'string' ? data.error : `Server returned status ${response.status}`);
+            showErrorBanner(errorMsg);
+            return;
         }
 
-        const data = await response.json();
-        updateKPICards(data.summary);
+        hideErrorBanner();
+        updateKPICards(data.summary, data.model_breakdown);
         renderDailyChart(data.daily_trend);
         renderModelChart(data.model_breakdown);
         renderDetailedTable(data.daily_trend, data.model_breakdown, data.detailed_logs);
 
     } catch (error) {
         console.error("Failed to load dashboard metrics:", error);
+        showErrorBanner("Could not connect to dashboard API: " + error.message);
     }
 }
 
-function updateKPICards(summary) {
+function getAggregatedModelBreakdown(modelBreakdown) {
+    const aggregated = {};
+    (modelBreakdown || []).forEach(m => {
+        const raw = String(m.model || "unknown");
+        const cleanName = raw.includes("/") ? raw.split("/").pop().trim() : raw.trim();
+        if (!aggregated[cleanName]) {
+            aggregated[cleanName] = {
+                model: cleanName,
+                tokens: 0,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                spend: 0,
+                requests: 0
+            };
+        }
+        aggregated[cleanName].tokens += (m.tokens || 0);
+        aggregated[cleanName].prompt_tokens += (m.prompt_tokens || 0);
+        aggregated[cleanName].completion_tokens += (m.completion_tokens || 0);
+        aggregated[cleanName].spend += (m.spend || 0);
+        aggregated[cleanName].requests += (m.requests || 0);
+    });
+    return Object.values(aggregated).filter(m => (m.tokens || 0) > 0 || (m.spend || 0) > 0);
+}
+
+function updateKPICards(summary, modelBreakdown) {
     if (!summary) return;
 
-    document.getElementById("kpi-total-spend").innerText = `$${(summary.total_spend || 0).toFixed(4)}`;
+    const activeModels = getAggregatedModelBreakdown(modelBreakdown);
+
+    document.getElementById("kpi-total-spend").innerText = `$${(summary.total_spend || 0).toFixed(2)}`;
     document.getElementById("kpi-total-tokens").innerText = (summary.total_tokens || 0).toLocaleString();
     document.getElementById("kpi-prompt-tokens").innerText = (summary.prompt_tokens || 0).toLocaleString();
     document.getElementById("kpi-completion-tokens").innerText = (summary.completion_tokens || 0).toLocaleString();
-    document.getElementById("kpi-active-models").innerText = summary.active_models_count || 0;
+    document.getElementById("kpi-active-models").innerText = activeModels.length;
 }
 
 function renderDailyChart(dailyTrend) {
@@ -171,19 +221,47 @@ function renderDailyChart(dailyTrend) {
 }
 
 function renderModelChart(modelBreakdown) {
-    const ctx = document.getElementById("modelChart")?.getContext("2d");
-    if (!ctx) return;
+    const canvas = document.getElementById("modelChart");
+    if (!canvas) return;
+    const container = canvas.parentElement;
 
-    const labels = modelBreakdown.map(m => m.model);
-    const dataValues = modelBreakdown.map(m => m.tokens);
+    const activeModels = getAggregatedModelBreakdown(modelBreakdown);
+
+    if (activeModels.length === 0) {
+        if (modelChartInstance) {
+            modelChartInstance.destroy();
+            modelChartInstance = null;
+        }
+        let emptyNotice = container.querySelector(".chart-empty-notice");
+        if (!emptyNotice) {
+            emptyNotice = document.createElement("div");
+            emptyNotice.className = "chart-empty-notice";
+            emptyNotice.style.cssText = "display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-dim);font-size:0.875rem;";
+            emptyNotice.innerText = "No model token consumption in selected range";
+            container.appendChild(emptyNotice);
+        }
+        canvas.style.display = "none";
+        emptyNotice.style.display = "flex";
+        return;
+    }
+
+    const emptyNotice = container.querySelector(".chart-empty-notice");
+    if (emptyNotice) {
+        emptyNotice.style.display = "none";
+    }
+    canvas.style.display = "block";
+
+    const labels = activeModels.map(m => m.model);
+    const dataValues = activeModels.map(m => m.tokens || m.spend || 0);
     const colors = [
-        '#6366f1', '#06b6d4', '#10b981', '#f59e0b', '#a855f7', '#f43f5e'
+        '#6366f1', '#06b6d4', '#10b981', '#f59e0b', '#a855f7', '#f43f5e', '#ec4899', '#8b5cf6', '#3b82f6', '#14b8a6'
     ];
 
     if (modelChartInstance) {
         modelChartInstance.destroy();
     }
 
+    const ctx = canvas.getContext("2d");
     modelChartInstance = new Chart(ctx, {
         type: 'doughnut',
         data: {
@@ -229,7 +307,7 @@ function renderDetailedTable(dailyTrend, modelBreakdown, rawLogs) {
             <td>${row.prompt_tokens.toLocaleString()}</td>
             <td>${row.completion_tokens.toLocaleString()}</td>
             <td><strong>${row.total_tokens.toLocaleString()}</strong></td>
-            <td style="color: var(--accent-emerald); font-weight: 600;">$${row.spend.toFixed(4)}</td>
+            <td style="color: var(--accent-emerald); font-weight: 600;">$${row.spend.toFixed(2)}</td>
         `;
         tbody.appendChild(tr);
     });

@@ -45,11 +45,20 @@
                 </div>
             </div>
 
+            <!-- Error Banner -->
+            <div id="dashboard-error-banner" class="error-banner" style="display: none;">
+                <div class="error-banner-content">
+                    <span class="error-banner-icon">⚠️</span>
+                    <span id="dashboard-error-text">Unable to fetch metrics from LiteLLM Proxy.</span>
+                </div>
+                <button id="btn-dismiss-error" class="btn-dismiss" title="Dismiss">&times;</button>
+            </div>
+
             <!-- KPI Cards Summary -->
             <section class="kpi-grid">
                 <div class="kpi-card" style="--card-accent: var(--accent-emerald);">
                     <div class="kpi-label">Total Spend ($)</div>
-                    <div class="kpi-value" id="kpi-total-spend">$0.0000</div>
+                    <div class="kpi-value" id="kpi-total-spend">$0.00</div>
                     <div class="kpi-subtext">Cumulative cost for selected range</div>
                 </div>
 

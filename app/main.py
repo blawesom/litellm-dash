@@ -2,6 +2,7 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response, Form, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -15,10 +16,19 @@ from app.litellm_client import LiteLLMClient
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO))
 logger = logging.getLogger("litellm_dash.main")
 
+# Initialize LiteLLM Client
+litellm_client = LiteLLMClient()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    await litellm_client.aclose()
+
 app = FastAPI(
     title="LiteLLM Analytics Dashboard",
     description="Python web service hosted alongside LiteLLM Proxy for key/user verification and daily token/spend dashboard.",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,9 +36,6 @@ BASE_DIR = Path(__file__).resolve().parent
 # Mount static files & templates
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-
-# Initialize LiteLLM Client
-litellm_client = LiteLLMClient()
 
 @app.get("/", response_class=HTMLResponse)
 async def root(request: Request):
@@ -114,13 +121,20 @@ async def get_dashboard_stats(
     user_id = user_payload["user_id"]
     api_key = user_payload["api_key"]
 
-    metrics = await litellm_client.get_dashboard_metrics(
-        user_id=user_id,
-        api_key=api_key,
-        start_date=start_date,
-        end_date=end_date
-    )
-    return JSONResponse(content=metrics)
+    try:
+        metrics = await litellm_client.get_dashboard_metrics(
+            user_id=user_id,
+            api_key=api_key,
+            start_date=start_date,
+            end_date=end_date
+        )
+        return JSONResponse(content=metrics)
+    except Exception as e:
+        logger.error(f"Error fetching dashboard metrics: {e}")
+        return JSONResponse(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            content={"error": True, "detail": str(e)}
+        )
 
 @app.post("/api/auth/logout")
 @app.get("/logout")
